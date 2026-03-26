@@ -1,0 +1,12 @@
+# Install: pip install -r requirements.txt
+# NL→SQL via OpenAI: pip install -e ".[nl-sql]"
+
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+langgraph>=0.2.0
+langchain-core>=0.3.0
+mcp[cli]>=1.0.0
+numpy>=2.0.0
+pydantic>=2.9.0
+pydantic-settings>=2.6.0
+typing-extensions>=4.12.0

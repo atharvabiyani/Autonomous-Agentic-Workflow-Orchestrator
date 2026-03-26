@@ -1,0 +1,139 @@
+Metadata-Version: 2.1
+Name: agentic-workflow-orchestrator
+Version: 0.2.0
+Summary: FastAPI + LangGraph manager with Data-Fetcher (MCP SQLite + NL→SQL) and Analyst (NumPy) sub-agents
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Provides-Extra: dev
+Provides-Extra: nl-sql
+Provides-Extra: postgres
+
+# Agentic Workflow Orchestrator
+
+High-performance **Manager → sub-agent** orchestration using **FastAPI**, **LangGraph** (stateful graph), and strict **type hints** (mypy-ready). Data access follows the **[Model Context Protocol](https://modelcontextprotocol.io/)** (stdio client + tools), aligned with the [MCP Python SDK](https://github.com/modelcontextprotocol/python-sdk) and the [client quickstart](https://modelcontextprotocol.io/quickstart/client).
+
+The **Manager** runs a **Plan → Execute → Verify** loop and delegates to:
+
+| Sub-agent | Role | Implementation |
+|-----------|------|----------------|
+| **Data-Fetcher** | Schema + NL→read-only SQL + query | MCP tools `list_tables`, `get_table_schema`, `read_query` on a **local SQLite** file (see `mcp_server/sqlite_server.py`) |
+| **Analyst** | Numeric summaries | NumPy reductions in `tools/analyst_tools.py` |
+
+## Project layout
+
+```
+agents/              # Manager + Data-Fetcher (async MCP) + Analyst
+app/                 # FastAPI lifespan (stdio MCP) + LangGraph (async ainvoke)
+mcp_server/          # FastMCP SQLite server (read-only tools)
+schema/              # Pydantic models, WorkflowGraphState TypedDict
+tools/               # MCP client, read-only SQL guard, NL→SQL, NumPy
+scripts/             # Optional demo DB bootstrap
+workflow_state.md    # Human-edited execution log
+```
+
+## Quick start
+
+```bash
+cd /path/to/Resume_Project_1
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e ".[dev]"
+```
+
+### Demo SQLite file
+
+```bash
+python scripts/init_demo_sqlite.py data/demo.sqlite
+```
+
+### Run the API with MCP SQLite
+
+Point the app at your `.sqlite` file. On startup it spawns `python -m mcp_server.sqlite_server` over **stdio** (same pattern as the official MCP client tutorial) and keeps the session open for the app lifetime.
+
+```bash
+export PYTHONPATH="$(pwd)"
+export SQLITE_DB_PATH="$(pwd)/data/demo.sqlite"
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+```
+
+- Health: `GET http://localhost:8000/health`
+- Run workflow: `POST http://localhost:8000/workflow/run`
+
+```json
+{
+  "goal": "Fetch data from the database and compute the average with numpy"
+}
+```
+
+With `SQLITE_DB_PATH` unset, the API uses `StubAsyncDataFetchClient` (in-memory demo rows, no MCP subprocess).
+
+### Natural language → SQL
+
+When a `data_fetcher` step has **`sql: null`**, the fetcher:
+
+1. Calls MCP **`list_tables`** and **`get_table_schema`** (up to 8 tables) for context.
+2. Generates a **single read-only** `SELECT` / `WITH` via `tools/nl_sql.py`:
+   - If **`OPENAI_API_KEY`** is set, install `pip install -e ".[nl-sql]"` and the model named by **`OPENAI_NL_SQL_MODEL`** (default `gpt-4o-mini`) produces SQL.
+   - Otherwise a small **heuristic** mapper is used (good for demos; name tables in the instruction if you have more than one).
+3. Validates SQL again with `tools/read_only_sql.py`, then executes via MCP **`read_query`** (SQLite **authorizer** also blocks writes).
+
+Explicit SQL still works: set `sql` on the `PlanStep` to skip NL generation (SQL is still validated as read-only before MCP).
+
+### Optional explicit plan
+
+```json
+{
+  "goal": "Custom run",
+  "plan_override": [
+    {
+      "step_id": "f1",
+      "agent": "data_fetcher",
+      "instruction": "Average of value column from metrics",
+      "sql": null,
+      "data_key": "rows"
+    },
+    {
+      "step_id": "a1",
+      "agent": "analyst",
+      "instruction": "Mean of fetched data",
+      "data_key": "stats",
+      "input_data_key": "rows",
+      "numpy_op": "mean"
+    }
+  ]
+}
+```
+
+## MCP server tools (`mcp_server/sqlite_server.py`)
+
+| Tool | Purpose |
+|------|---------|
+| `list_tables` | User tables from `sqlite_master` |
+| `get_table_schema` | `CREATE TABLE` + `PRAGMA table_info` JSON |
+| `read_query` | Read-only `SELECT` / `WITH` (authorizer + app-side checks) |
+
+Manual server run (for debugging with MCP Inspector, etc.):
+
+```bash
+export SQLITE_MCP_DB_PATH="$(pwd)/data/demo.sqlite"
+python -m mcp_server.sqlite_server
+```
+
+## Legacy Postgres helpers
+
+Optional: `pip install -e ".[postgres]"` and use `tools/postgres_mcp.py` in your own wiring (the default app path is SQLite MCP as above).
+
+## Type checking and lint
+
+```bash
+PYTHONPATH="$(pwd)" mypy agents app mcp_server schema tools
+PYTHONPATH="$(pwd)" ruff check agents app mcp_server schema tools
+```
+
+## Extending the Manager
+
+`HeuristicManager` in `agents/manager_agent.py` is intentionally deterministic. Swap in an LLM planner that outputs validated `PlanStep` models while keeping the LangGraph **Plan → Execute → Verify** structure in `app/graph.py`.
+
+## Execution log
+
+Update `workflow_state.md` after runs or design reviews.
